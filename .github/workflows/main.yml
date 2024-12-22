@@ -1,0 +1,96 @@
+import cheerio from 'cheerio';
+import cookie from 'cookie';
+import fetch from 'node-fetch';
+import FormData from 'form-data';
+
+async function sendGetRequest(url, formData = {}, cookies) {
+  const encode = encodeURIComponent;
+  const queryParams = Object.keys(formData)
+    .map((key) => {
+      const values = formData[key];
+      const isArray = Array.isArray(values);
+      const encodedKey = encode(key + (isArray ? '[]' : ''));
+      const paramList = (isArray ? values : [values]).map((value) => `${encodedKey}=${encode(value)}`);
+      return paramList.join('&');
+    })
+    .join('&');
+
+  return await fetch(`${url}?${queryParams}`, {
+    method: 'GET',
+    headers: {
+      Accept: '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': 'GoogleBot',
+      Cookie: cookies,
+    },
+  });
+}
+
+async function generateStyledText(url, text) {
+  if (!/^https:\/\/textpro\.me\/.+\.html$/.test(url)) {
+    throw new Error('Invalid URL provided!');
+  }
+
+  const fetchPage = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'User-Agent': 'GoogleBot',
+    },
+  });
+
+  const pageHtml = await fetchPage.text();
+  let cookieData = fetchPage.headers
+    .get('set-cookie')
+    .split(',')
+    .map((entry) => cookie.parse(entry))
+    .reduce((accumulator, current) => ({ ...accumulator, ...current }), {});
+
+  cookieData = {
+    __cfduid: cookieData.__cfduid,
+    PHPSESSID: cookieData.PHPSESSID,
+  };
+
+  const cookieString = Object.entries(cookieData)
+    .map(([key, value]) => cookie.serialize(key, value))
+    .join('; ');
+
+  const $ = cheerio.load(pageHtml);
+  const csrfToken = $('input[name="token"]').attr('value');
+
+  const formPayload = new FormData();
+  (Array.isArray(text) ? text : [text]).forEach((inputText) => formPayload.append('text[]', inputText));
+  formPayload.append('submit', 'Go');
+  formPayload.append('token', csrfToken);
+  formPayload.append('build_server', 'https://textpro.me');
+  formPayload.append('build_server_id', 1);
+
+  const fetchResult = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Accept: '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': 'GoogleBot',
+      Cookie: cookieString,
+      ...formPayload.getHeaders(),
+    },
+    body: formPayload.getBuffer(),
+  });
+
+  const resultHtml = await fetchResult.text();
+  const jsonPayloadMatch = /<div.*?id="form_value".+>(.*?)<\/div>/.exec(resultHtml);
+
+  if (!jsonPayloadMatch) {
+    throw new Error('Token not found!');
+  }
+
+  const createImageResponse = await sendGetRequest(
+    'https://textpro.me/effect/create-image',
+    JSON.parse(jsonPayloadMatch[1]),
+    cookieString
+  );
+
+  const imageResponse = await createImageResponse.json();
+  return `https://textpro.me${imageResponse.fullsize_image}`;
+}
+
+export { generateStyledText };
